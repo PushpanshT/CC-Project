@@ -1,0 +1,11 @@
+{
+  "comment": "Sample AWS EventBridge trigger payload or manual Lambda console test event",
+  "urls": [
+    "https://www.google.com",
+    "https://httpstat.us/200",
+    "https://httpstat.us/500",
+    "https://httpstat.us/504?sleep=6000"
+  ],
+  "trigger_source": "aws.events.eventbridge",
+  "environment": "production-monitoring"
+}

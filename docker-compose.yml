@@ -1,0 +1,45 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Main Service: Automated Website Availability Monitor Dashboard & Server
+  # ----------------------------------------------------------------------------
+  web-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aws-website-availability-monitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - TARGET_URLS=https://www.google.com,https://aws.amazon.com,https://api.github.com
+      - AWS_DEFAULT_REGION=us-east-1
+      - CONSECUTIVE_FAILURE_THRESHOLD=2
+      - REQUEST_TIMEOUT_SECONDS=5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/targets"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 2. Optional Service: LocalStack (Local AWS Cloud Simulator)
+  #    Run with: docker compose --profile cloud up
+  #    Emulates: EventBridge, Lambda, CloudWatch, SNS, DynamoDB locally without AWS costs
+  # ----------------------------------------------------------------------------
+  localstack:
+    image: localstack/localstack:latest
+    container_name: aws-localstack-emulator
+    profiles:
+      - cloud
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,cloudwatch,events,dynamodb,lambda
+      - DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./.localstack}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"

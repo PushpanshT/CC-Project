@@ -1,0 +1,64 @@
+{
+  "TableName": "WebsiteHealthLogs",
+  "Description": "Amazon DynamoDB sample records showing state tracking and historical audit entries",
+  "TableSchema": {
+    "PartitionKey": "Url (String)",
+    "SortKey": "RecordType (String)",
+    "BillingMode": "PAY_PER_REQUEST (On-Demand Serverless)",
+    "TTL": "TimeToLive (Auto-deletes audit logs after 30 days)"
+  },
+  "Items": [
+    {
+      "Url": { "S": "https://www.google.com" },
+      "RecordType": { "S": "STATE" },
+      "LastStatus": { "S": "UP" },
+      "ConsecutiveFailures": { "N": "0" },
+      "LastCheckTimestamp": { "S": "2026-10-21T06:45:00.000Z" },
+      "LastStatusCode": { "N": "200" },
+      "LastLatencyMs": { "S": "82.45" },
+      "LastError": { "S": "None" },
+      "_comment": "STATE record: Stores latest state & 2-strike consecutive failure counter to prevent false alarms"
+    },
+    {
+      "Url": { "S": "https://www.google.com" },
+      "RecordType": { "S": "LOG#2026-10-21T06:45:00.000Z" },
+      "Status": { "S": "UP" },
+      "StatusCode": { "N": "200" },
+      "LatencyMs": { "S": "82.45" },
+      "Error": { "S": "None" },
+      "TimeToLive": { "N": "1795157100" },
+      "_comment": "HISTORICAL LOG record: Audit entry for availability tracking & SLA compliance"
+    },
+    {
+      "Url": { "S": "https://httpstat.us/500" },
+      "RecordType": { "S": "STATE" },
+      "LastStatus": { "S": "DOWN" },
+      "ConsecutiveFailures": { "N": "2" },
+      "LastCheckTimestamp": { "S": "2026-10-21T06:45:00.000Z" },
+      "LastStatusCode": { "N": "500" },
+      "LastLatencyMs": { "S": "342.10" },
+      "LastError": { "S": "HTTP Error 500: Internal Server Error" },
+      "_comment": "OUTAGE STATE: ConsecutiveFailures reaches 2, triggering Amazon SNS Incident Email Alert"
+    },
+    {
+      "Url": { "S": "https://httpstat.us/500" },
+      "RecordType": { "S": "LOG#2026-10-21T06:40:00.000Z" },
+      "Status": { "S": "DOWN" },
+      "StatusCode": { "N": "500" },
+      "LatencyMs": { "S": "320.50" },
+      "Error": { "S": "HTTP Error 500: Internal Server Error (Strike 1: Pending)" },
+      "TimeToLive": { "N": "1795156800" },
+      "_comment": "First failure (Strike 1) logged in history but alert suppressed pending confirmation"
+    },
+    {
+      "Url": { "S": "https://httpstat.us/500" },
+      "RecordType": { "S": "LOG#2026-10-21T06:45:00.000Z" },
+      "Status": { "S": "DOWN" },
+      "StatusCode": { "N": "500" },
+      "LatencyMs": { "S": "342.10" },
+      "Error": { "S": "HTTP Error 500: Internal Server Error (Strike 2: SNS Alert Dispatched)" },
+      "TimeToLive": { "N": "1795157100" },
+      "_comment": "Second consecutive failure (Strike 2) logged; SNS notification dispatched"
+    }
+  ]
+}

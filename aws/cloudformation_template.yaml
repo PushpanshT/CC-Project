@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS CloudFormation Template: Automated Website Availability Monitoring on AWS
+  Cloud Computing Lab Practical Project.
+  Provisions EventBridge Scheduler, AWS Lambda, CloudWatch Alarms, Amazon SNS Topic, and DynamoDB.
+
+Parameters:
+  TargetWebsiteUrl:
+    Type: String
+    Default: 'https://www.google.com'
+    Description: 'Primary website URL to monitor (HTTPS/HTTP endpoint).'
+
+  MonitoringFrequencyMinutes:
+    Type: Number
+    Default: 5
+    AllowedValues: [1, 2, 5, 10, 15, 30, 60]
+    Description: 'Monitoring interval in minutes for Amazon EventBridge scheduled rule.'
+
+  NotificationEmail:
+    Type: String
+    Default: 'student.cloudlab@example.com'
+    Description: 'Email address subscribed to Amazon SNS topic to receive instant downtime & recovery alerts.'
+
+  RequestTimeoutSeconds:
+    Type: Number
+    Default: 5
+    MinValue: 2
+    MaxValue: 30
+    Description: 'HTTP request timeout threshold in seconds before marking website as DOWN.'
+
+  ConsecutiveFailuresThreshold:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 5
+    Description: 'Number of consecutive failed health checks required before triggering alarm and alert.'
+
+Resources:
+  # 1. Amazon SNS Topic for Downtime & Recovery Notifications
+  MonitoringSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: 'WebsiteAvailabilityAlertsTopic'
+      DisplayName: 'Website Monitoring Incident Alerts'
+
+  # 2. SNS Email Subscription
+  MonitoringSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref MonitoringSNSTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # 3. Amazon DynamoDB Table for Health Logs & State Persistence
+  WebsiteHealthLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: 'WebsiteHealthLogs'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'Url'
+          AttributeType: 'S'
+        - AttributeName: 'RecordType'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'Url'
+          KeyType: 'HASH'
+        - AttributeName: 'RecordType'
+          KeyType: 'RANGE'
+      TimeToLiveSpecification:
+        AttributeName: 'TimeToLive'
+        Enabled: true
+
+  # 4. AWS IAM Role for Lambda Execution
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'WebsiteAvailabilityMonitoringLambdaRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: 'WebsiteMonitoringPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+              # CloudWatch Custom Metrics permissions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              # Amazon SNS Publish permissions
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref MonitoringSNSTopic
+              # Amazon DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource: !GetAtt WebsiteHealthLogsTable.Arn
+
+  # 5. AWS Lambda Function for Health Check Execution
+  AvailabilityCheckerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 'AutomatedWebsiteAvailabilityChecker'
+      Description: 'Performs periodic HTTP availability and latency checks, logs metrics, and triggers alerts.'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TARGET_URLS: !Ref TargetWebsiteUrl
+          SNS_TOPIC_ARN: !Ref MonitoringSNSTopic
+          DYNAMODB_TABLE: !Ref WebsiteHealthLogsTable
+          METRIC_NAMESPACE: 'WebsiteMonitoring/Availability'
+          REQUEST_TIMEOUT_SECONDS: !Ref RequestTimeoutSeconds
+          CONSECUTIVE_FAILURE_THRESHOLD: !Ref ConsecutiveFailuresThreshold
+      Code:
+        ZipFile: |
+          import json, os, time, ssl, urllib.request, urllib.error
+          from datetime import datetime, timezone
+          import boto3
+
+          cw = boto3.client('cloudwatch')
+          sns = boto3.client('sns')
+          dynamodb = boto3.resource('dynamodb')
+
+          def lambda_handler(event, context):
+              urls = os.environ.get('TARGET_URLS', 'https://www.google.com').split(',')
+              sns_arn = os.environ.get('SNS_TOPIC_ARN')
+              ns = os.environ.get('METRIC_NAMESPACE', 'WebsiteMonitoring/Availability')
+              timeout = int(os.environ.get('REQUEST_TIMEOUT_SECONDS', '5'))
+
+              results = []
+              for url in urls:
+                  url = url.strip()
+                  start = time.perf_counter()
+                  is_up, status_code, err = False, 0, None
+                  try:
+                      ctx = ssl.create_default_context()
+                      req = urllib.request.Request(url, headers={'User-Agent': 'AWS-Lambda-Monitor/1.0'})
+                      with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                          latency = (time.perf_counter() - start) * 1000.0
+                          status_code = resp.getcode()
+                          is_up = 200 <= status_code < 400
+                  except urllib.error.HTTPError as e:
+                      latency = (time.perf_counter() - start) * 1000.0
+                      status_code, err = e.code, str(e.reason)
+                  except Exception as e:
+                      latency = (time.perf_counter() - start) * 1000.0
+                      err = str(e)
+
+                  # Put CloudWatch Metrics
+                  try:
+                      cw.put_metric_data(
+                          Namespace=ns,
+                          MetricData=[
+                              {'MetricName': 'Availability', 'Dimensions': [{'Name': 'WebsiteUrl', 'Value': url}], 'Value': 1.0 if is_up else 0.0, 'Unit': 'Count'},
+                              {'MetricName': 'ResponseLatency', 'Dimensions': [{'Name': 'WebsiteUrl', 'Value': url}], 'Value': float(latency), 'Unit': 'Milliseconds'}
+                          ]
+                      )
+                  except Exception as ce:
+                      print(f"CloudWatch metric push error: {ce}")
+
+                  # If failure detected, publish SNS alert
+                  if not is_up and sns_arn:
+                      msg = f"CRITICAL: Website {url} is DOWN!\nStatus Code: {status_code}\nLatency: {round(latency,2)} ms\nError: {err}\nTimestamp: {datetime.now(timezone.utc)}"
+                      try:
+                          sns.publish(TopicArn=sns_arn, Subject=f"ALERT: Website DOWN ({url})", Message=msg)
+                      except Exception as se:
+                          print(f"SNS Publish error: {se}")
+
+                  results.append({'url': url, 'is_up': is_up, 'status_code': status_code, 'latency_ms': round(latency, 2), 'error': err})
+
+              return {'statusCode': 200, 'body': json.dumps(results)}
+
+  # 6. Amazon EventBridge Rule (Scheduled Cron Trigger)
+  MonitoringScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'WebsiteMonitoringScheduleRule'
+      Description: 'Triggers the Website Availability Lambda function at user-defined frequency.'
+      ScheduleExpression: !Sub 'rate(${MonitoringFrequencyMinutes} minute${!If [Equals, !Ref MonitoringFrequencyMinutes, 1, "", "s"]})'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AvailabilityCheckerLambda.Arn
+          Id: 'AvailabilityCheckerTarget'
+
+  # 7. Lambda Permission for EventBridge Rule
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AvailabilityCheckerLambda
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt MonitoringScheduleRule.Arn
+
+  # 8. Amazon CloudWatch Alarm for Website Availability Failure
+  CloudWatchAvailabilityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'WebsiteDownAlarm'
+      AlarmDescription: 'Triggers when website availability drops to 0 (Failure) for consecutive periods.'
+      Namespace: 'WebsiteMonitoring/Availability'
+      MetricName: 'Availability'
+      Dimensions:
+        - Name: 'WebsiteUrl'
+          Value: !Ref TargetWebsiteUrl
+      Statistic: 'Minimum'
+      Period: !Sub '${MonitoringFrequencyMinutes * 60}'
+      EvaluationPeriods: !Ref ConsecutiveFailuresThreshold
+      Threshold: 1
+      ComparisonOperator: 'LessThanThreshold'
+      TreatMissingData: 'breaching'
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+      OKActions:
+        - !Ref MonitoringSNSTopic
+
+  # 9. Amazon CloudWatch Alarm for High Latency (Degradation)
+  CloudWatchHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'WebsiteHighLatencyAlarm'
+      AlarmDescription: 'Triggers when average response latency exceeds 3000ms.'
+      Namespace: 'WebsiteMonitoring/Availability'
+      MetricName: 'ResponseLatency'
+      Dimensions:
+        - Name: 'WebsiteUrl'
+          Value: !Ref TargetWebsiteUrl
+      Statistic: 'Average'
+      Period: !Sub '${MonitoringFrequencyMinutes * 60}'
+      EvaluationPeriods: 2
+      Threshold: 3000
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the Health Check Lambda Function'
+    Value: !GetAtt AvailabilityCheckerLambda.Arn
+
+  SNSTopicArn:
+    Description: 'ARN of the SNS Incident Alerts Topic'
+    Value: !Ref MonitoringSNSTopic
+
+  DynamoDBTableName:
+    Description: 'Name of the DynamoDB table tracking check history'
+    Value: !Ref WebsiteHealthLogsTable
+
+  EventBridgeSchedule:
+    Description: 'Configured check frequency'
+    Value: !Sub 'Every ${MonitoringFrequencyMinutes} minute(s)'
+
+  AvailabilityAlarmName:
+    Description: 'Name of the CloudWatch Availability Alarm'
+    Value: !Ref CloudWatchAvailabilityAlarm
